@@ -670,6 +670,7 @@ button {
     inset:0;
     z-index:999;
     display:flex;
+    flex-direction:column;
     align-items:center;
     justify-content:center;
     background:var(--bg);
@@ -686,7 +687,7 @@ button {
 <body>
 
 <div id="loading" class="loading">
-    جاري الاتصال بالنظام...
+    <div>جاري الاتصال بالنظام...</div>
 </div>
 
 <!-- =====================================================
@@ -899,7 +900,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
     auth: {
         persistSession: true,
         autoRefreshToken: true,
-        detectSessionInUrl: true
+        detectSessionInUrl: false
     }
 });
 
@@ -911,6 +912,11 @@ let currentPage = "home";
 let authMode = "login";
 let calendarDate = new Date();
 let pendingAction = null;
+
+function hideLoading() {
+    const loadingEl = document.getElementById("loading");
+    if (loadingEl) loadingEl.classList.add("hidden");
+}
 
 function todayISO() {
     const d = new Date();
@@ -943,12 +949,10 @@ function toISO(date) {
     return date.toISOString().split("T")[0];
 }
 
-/* نظام التمارين والتدرج لـ 365 يوم */
 function getQuest(day) {
     if (day < 1) day = 1;
     if (day > 365) day = 365;
 
-    // يوم راحة وتجديد كل 7 أيام
     if (day % 7 === 0) {
         return {
             type: "rest",
@@ -1010,8 +1014,10 @@ async function handleAuth(event) {
 
     try {
         if (authMode === "login") {
-            const { error } = await supabase.auth.signInWithPassword({ email, password });
+            const { data, error } = await supabase.auth.signInWithPassword({ email, password });
             if (error) throw error;
+            user = data.user;
+            await loadUserDataAndRender();
             showToast("تم تصريح الدخول للنظام");
         } else {
             if (username.length < 2) throw new Error("اسم الصياد يجب أن يكون حرفين على الأقل.");
@@ -1020,11 +1026,13 @@ async function handleAuth(event) {
                 options: { data: { username } }
             });
             if (error) throw error;
-            if (!data.session) {
-                setAuthMessage("تم إنشاء الحساب. تفقد بريدك الإلكتروني لتأكيد الحساب.");
-                return;
+            if (data.session) {
+                user = data.user;
+                await loadUserDataAndRender();
+                showToast("تم تسجيل صياد جديد بنجاح");
+            } else {
+                setAuthMessage("تم تسجيل الحساب! يمكنك الآن تسجيل الدخول.");
             }
-            showToast("تم تسجيل صياد جديد");
         }
     } catch(error) {
         setAuthMessage(friendlyError(error.message));
@@ -1034,16 +1042,26 @@ async function handleAuth(event) {
 }
 
 async function loadUser() {
-    const { data, error } = await supabase.auth.getUser();
-    if (error) return false;
-    user = data.user;
-    return !!user;
+    try {
+        const { data, error } = await supabase.auth.getUser();
+        if (error || !data?.user) return false;
+        user = data.user;
+        return true;
+    } catch (e) {
+        return false;
+    }
 }
 
 async function loadProfile() {
-    const { data, error } = await supabase.from("profiles").select("*").eq("id", user.id).single();
+    const { data, error } = await supabase.from("profiles").select("*").eq("id", user.id).maybeSingle();
     if (error) throw error;
-    profile = data;
+    if (!data) {
+        const username = user.user_metadata?.username || user.email.split('@')[0];
+        const res = await supabase.from("profiles").insert({ id: user.id, username }).select().single();
+        profile = res.data;
+    } else {
+        profile = data;
+    }
 }
 
 async function loadJourney() {
@@ -1283,7 +1301,7 @@ function renderProfile() {
     const squats = logs.reduce((sum, log) => sum + log.squats, 0);
     const abs = logs.reduce((sum, log) => sum + log.abs, 0);
 
-    document.getElementById("profileName").textContent = profile.username;
+    document.getElementById("profileName").textContent = profile?.username || "الصياد";
     document.getElementById("profileEmail").textContent = user.email;
     document.getElementById("profileDays").textContent = logs.length;
     document.getElementById("profilePushups").textContent = pushups;
@@ -1374,24 +1392,28 @@ function showToast(msg) {
     toastTimer = setTimeout(() => toast.classList.remove("show"), 3000);
 }
 
+async function loadUserDataAndRender() {
+    await loadProfile();
+    await loadJourney();
+    await loadLogs();
+    document.getElementById("authScreen").classList.add("hidden");
+    document.getElementById("app").classList.remove("hidden");
+    renderAll();
+}
+
 async function initialize() {
     try {
         const loggedIn = await loadUser();
-        if (!loggedIn) {
+        if (loggedIn) {
+            await loadUserDataAndRender();
+        } else {
             document.getElementById("authScreen").classList.remove("hidden");
-            return;
         }
-        await loadProfile();
-        await loadJourney();
-        await loadLogs();
-
-        document.getElementById("authScreen").classList.add("hidden");
-        document.getElementById("app").classList.remove("hidden");
-        renderAll();
     } catch(error) {
-        showToast(friendlyError(error.message));
+        console.error("Initialization Error:", error);
+        document.getElementById("authScreen").classList.remove("hidden");
     } finally {
-        document.getElementById("loading").classList.add("hidden");
+        hideLoading();
     }
 }
 
@@ -1421,20 +1443,8 @@ document.getElementById("nextMonth").addEventListener("click", () => {
     renderCalendar();
 });
 
-supabase.auth.onAuthStateChange(async (event, session) => {
-    if (event === "SIGNED_IN" && session) {
-        user = session.user;
-        await loadProfile();
-        await loadJourney();
-        await loadLogs();
-        document.getElementById("authScreen").classList.add("hidden");
-        document.getElementById("app").classList.remove("hidden");
-        renderAll();
-    } else if (event === "SIGNED_OUT") {
-        document.getElementById("app").classList.add("hidden");
-        document.getElementById("authScreen").classList.remove("hidden");
-    }
-});
+// إخفاء شاشة الاتصال تلقائياً بعد ثانيتين كحد أقصى لمنع التعليق مطلقاً
+setTimeout(hideLoading, 2000);
 
 initialize();
 
